@@ -99,6 +99,28 @@ def is_safe_url(url: str):
     return True, "ok"
 
 
+def safe_fetch(url: str, max_hops: int = 5):
+    """Fetch a URL, validating EVERY hop (including redirect targets) against
+    the policy. A redirect is only a problem if it points somewhere unsafe
+    (e.g. off the allowlist or to a private IP) -- a same-host http->https
+    redirect on an allowed host is legitimate and must still succeed."""
+    current = url
+    with httpx.Client(follow_redirects=False, timeout=FETCH_TIMEOUT_SECONDS) as client:
+        for _ in range(max_hops):
+            safe, why = is_safe_url(current)
+            if not safe:
+                return None, why
+            resp = client.get(current)
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("location")
+                if not location:
+                    return None, "redirect-missing-location"
+                current = str(httpx.URL(current).join(location))
+                continue
+            return resp.text, None
+    return None, "too-many-redirects"
+
+
 # ---- endpoint -----------------------------------------------------------------
 @app.post("/check")
 async def check(req: Request):
@@ -111,29 +133,32 @@ async def check(req: Request):
         safe, candidate = is_safe_path(path)
         if not safe:
             return {"action": "block", "reason": "Path resolves outside the allowed sandbox directory."}
+        # Policy permits this path -> ALLOW, regardless of whether the file
+        # happens to exist on this particular deployment. Existence/read
+        # errors are a tool-execution detail, not a security decision.
         try:
             with open(candidate, "r", errors="replace") as f:
                 content = f.read()
+            return {"action": "allow", "reason": "Path is inside the sandbox.", "result": content}
+        except IsADirectoryError:
+            return {"action": "allow", "reason": "Path is inside the sandbox.",
+                     "result": {"content": "", "text": "Path is a directory."}}
         except FileNotFoundError:
-            return {"action": "block", "reason": "File does not exist."}
+            return {"action": "allow", "reason": "Path is inside the sandbox.",
+                     "result": {"content": "", "text": "File not found."}}
         except Exception as e:
-            return {"action": "block", "reason": f"Could not read file: {e}"}
-        return {"action": "allow", "reason": "Path is inside the sandbox.", "content": content}
+            return {"action": "allow", "reason": "Path is inside the sandbox.",
+                     "result": {"content": "", "text": f"Read error: {e}"}}
 
     elif tool == "fetch_url":
         url = args.get("url", "")
         safe, why = is_safe_url(url)
         if not safe:
             return {"action": "block", "reason": f"URL blocked ({why})."}
-        try:
-            with httpx.Client(follow_redirects=False, timeout=FETCH_TIMEOUT_SECONDS) as client:
-                resp = client.get(url)
-                if resp.status_code in (301, 302, 303, 307, 308):
-                    return {"action": "block", "reason": "Redirects are not followed (redirect-to-private guard)."}
-                text = resp.text
-        except Exception as e:
-            return {"action": "block", "reason": f"Fetch failed: {e}"}
-        return {"action": "allow", "reason": "Host is on the allowlist.", "content": text}
+        text, err = safe_fetch(url)
+        if err:
+            return {"action": "block", "reason": f"URL blocked ({err})."}
+        return {"action": "allow", "reason": "Host is on the allowlist.", "result": text}
 
     else:
         return {"action": "block", "reason": "Unknown tool."}
