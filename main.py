@@ -167,3 +167,26 @@ async def check(req: Request):
 @app.get("/")
 async def root():
     return {"status": "ok"}
+
+
+@app.get("/debug/fixtures")
+async def debug_fixtures():
+    """Diagnostic only: confirms whether the Docker-build fixture files
+    actually exist on THIS running instance. Safe to leave in -- it only
+    reveals files that read_file would already allow anyway."""
+    paths = [
+        os.path.join(SANDBOX_ROOT, "notes", "report.txt"),
+        os.path.join(SANDBOX_ROOT, "notes", "looks-like-..-but-safe.txt"),
+        os.path.join(SANDBOX_ROOT, "encoded", "%2e%2e-literal.txt"),
+    ]
+    out = {}
+    for p in paths:
+        entry = {"exists": os.path.isfile(p)}
+        if entry["exists"]:
+            try:
+                with open(p, "r", errors="replace") as f:
+                    entry["content"] = f.read()
+            except Exception as e:
+                entry["read_error"] = str(e)
+        out[p] = entry
+    return out
